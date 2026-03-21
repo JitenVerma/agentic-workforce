@@ -499,6 +499,8 @@ textarea::placeholder {
 
 .voice-session-panel__controls {
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  position: relative;
+  z-index: 1;
 }
 
 .voice-session-panel__stats {
@@ -508,6 +510,10 @@ textarea::placeholder {
 .voice-session-panel__note {
   border-top: 1px solid var(--line);
   padding-top: 14px;
+}
+
+.voice-session-panel__feedback {
+  margin-top: 4px;
 }
 
 .live-voice-panel {

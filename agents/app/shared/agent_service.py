@@ -15,6 +15,8 @@ from google.adk.runners import Runner
 from google.adk.sessions.in_memory_session_service import InMemorySessionService
 from google.adk.utils.context_utils import Aclosing
 
+from app.shared.langfuse import shutdown_langfuse
+
 
 def create_agent_service(
     root_agent: Agent,
@@ -102,6 +104,7 @@ def create_agent_service(
     @app.on_event("shutdown")
     async def shutdown_a2a_app():
         await a2a_app.router.shutdown()
+        shutdown_langfuse()
 
     @app.websocket("/run_live")
     async def run_agent_live(

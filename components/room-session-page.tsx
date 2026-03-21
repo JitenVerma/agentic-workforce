@@ -128,11 +128,13 @@ export function RoomSessionPage({ roomId }: RoomSessionPageProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isEndingRoom, setIsEndingRoom] = useState(false);
   const [muted, setMuted] = useState(false);
+  const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
 
   const roomRef = useRef<RoomSession | null>(null);
   const clientRef = useRef<RealtimeRoomClient | null>(null);
   const microphoneRef = useRef<MicrophoneStream | null>(null);
   const playerRef = useRef<PcmPlayer | null>(null);
+  const isUnmountingRef = useRef(false);
 
   useEffect(() => {
     roomRef.current = room;
@@ -181,6 +183,7 @@ export function RoomSessionPage({ roomId }: RoomSessionPageProps) {
   }, [roomId]);
 
   useEffect(() => {
+    isUnmountingRef.current = false;
     if (!room) {
       return;
     }
@@ -384,6 +387,11 @@ export function RoomSessionPage({ roomId }: RoomSessionPageProps) {
         setTransportState(state);
         if (state === "error") {
           setSubmitError("The realtime gateway disconnected.");
+          setVoiceNotice("The realtime gateway disconnected.");
+        }
+        if (state === "closed" && !isUnmountingRef.current) {
+          setSubmitError("The realtime gateway closed. Reconnect the room transport to continue.");
+          setVoiceNotice("The realtime gateway closed. Reconnect voice to continue.");
         }
       },
     });
@@ -405,6 +413,7 @@ export function RoomSessionPage({ roomId }: RoomSessionPageProps) {
     });
 
     return () => {
+      isUnmountingRef.current = true;
       client.disconnect({ reason: "room_unmount" });
       clientRef.current = null;
     };
@@ -456,22 +465,54 @@ export function RoomSessionPage({ roomId }: RoomSessionPageProps) {
     return speakingParticipant ? `${speakingParticipant.name} speaking` : "No active speaker";
   }, [renderedParticipants]);
 
+  const connectTransport = async () => {
+    const activeRoom = roomRef.current;
+    if (!activeRoom) {
+      return;
+    }
+
+    const selectedAgents = activeRoom.participants
+      .filter(
+        (participant) =>
+          participant.role === "software_engineer" ||
+          participant.role === "solutions_architect",
+      )
+      .map((participant) => participant.role as SpecialistRole);
+
+    if (!clientRef.current) {
+      throw new Error("The room transport client is not ready yet. Please try again.");
+    }
+
+    setSubmitError(null);
+    setVoiceNotice("Reconnecting the room transport.");
+
+    await clientRef.current.connect({
+      roomId: activeRoom.id,
+      projectId: activeRoom.project.id,
+      projectName: activeRoom.project.name,
+      projectSummary: buildProjectSummary(activeRoom),
+      selectedAgents,
+      conversationMode: "voice",
+    });
+  };
+
   const connectVoice = async () => {
     if (voiceState === "connected" || voiceState === "connecting") {
       return;
     }
 
-    if (!clientRef.current) {
-      setSubmitError("The realtime gateway is not connected yet.");
-      return;
-    }
-
     setVoiceState("connecting");
     setSubmitError(null);
+    setVoiceNotice("Preparing the voice session.");
 
     try {
+      if (!clientRef.current || transportState !== "connected") {
+        await connectTransport();
+      }
+
       playerRef.current ??= new PcmPlayer();
       await playerRef.current.ensureReady();
+      setVoiceNotice("Requesting microphone access.");
 
       const microphone = new MicrophoneStream({
         onSpeechStart: (messageId, mimeType) => {
@@ -490,11 +531,13 @@ export function RoomSessionPage({ roomId }: RoomSessionPageProps) {
       await microphone.start();
       microphone.setMuted(muted);
       setVoiceState("connected");
+      setVoiceNotice("Voice connected. Speak naturally when you are ready.");
     } catch (error) {
       setVoiceState("error");
-      setSubmitError(
-        error instanceof Error ? error.message : "Unable to connect the microphone.",
-      );
+      const message =
+        error instanceof Error ? error.message : "Unable to connect the microphone.";
+      setSubmitError(message);
+      setVoiceNotice(message);
     }
   };
 
@@ -502,6 +545,7 @@ export function RoomSessionPage({ roomId }: RoomSessionPageProps) {
     await microphoneRef.current?.stop();
     microphoneRef.current = null;
     setVoiceState("idle");
+    setVoiceNotice("Voice disconnected.");
   };
 
   const submitMessage = async (event: FormEvent) => {
@@ -617,6 +661,7 @@ export function RoomSessionPage({ roomId }: RoomSessionPageProps) {
           </span>
           <button
             className="control-chip control-chip--danger"
+            type="button"
             onClick={() => void endRoom()}
             disabled={isEndingRoom}
           >
@@ -676,14 +721,20 @@ export function RoomSessionPage({ roomId }: RoomSessionPageProps) {
             <div className="voice-session-panel__controls">
               <button
                 className="primary-button"
+                type="button"
                 onClick={() => void connectVoice()}
-                disabled={transportState !== "connected" || voiceState === "connected" || voiceState === "connecting"}
+                disabled={voiceState === "connected" || voiceState === "connecting"}
               >
                 <Mic size={16} />
-                {voiceState === "connecting" ? "Connecting" : "Connect voice"}
+                {voiceState === "connecting"
+                  ? "Connecting"
+                  : transportState === "connected"
+                    ? "Connect voice"
+                    : "Reconnect & connect voice"}
               </button>
               <button
                 className="ghost-button"
+                type="button"
                 onClick={() => void disconnectVoice()}
                 disabled={voiceState !== "connected"}
               >
@@ -692,6 +743,7 @@ export function RoomSessionPage({ roomId }: RoomSessionPageProps) {
               </button>
               <button
                 className="ghost-button"
+                type="button"
                 onClick={() => setMuted((current) => !current)}
                 disabled={voiceState !== "connected"}
               >
@@ -720,6 +772,13 @@ export function RoomSessionPage({ roomId }: RoomSessionPageProps) {
             <p className="call-note voice-session-panel__note">
               Audio is captured in the browser as PCM16 and streamed to the Python gateway, which forwards it into ADK live mode for the Coordinator. Specialist agents stay internal and do not speak directly to the browser.
             </p>
+
+            {voiceNotice ? (
+              <div className="empty-state voice-session-panel__feedback">
+                <Radio size={18} />
+                <p>{voiceNotice}</p>
+              </div>
+            ) : null}
           </section>
 
           <section className="panel room-composer">

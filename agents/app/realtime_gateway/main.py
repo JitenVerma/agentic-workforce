@@ -11,6 +11,7 @@ except ImportError:  # pragma: no cover
 
 from app.realtime_gateway.config import get_realtime_gateway_settings
 from app.realtime_gateway.websocket_router import router
+from app.shared.langfuse import shutdown_langfuse
 
 
 if load_dotenv is not None:
@@ -30,6 +31,11 @@ async def root() -> dict[str, str]:
         "service": settings.gateway_title,
         "websocket": settings.websocket_path,
     }
+
+
+@app.on_event("shutdown")
+async def shutdown_observability() -> None:
+    shutdown_langfuse()
 
 
 app.include_router(router)

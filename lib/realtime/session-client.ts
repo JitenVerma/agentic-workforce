@@ -25,7 +25,7 @@ interface RealtimeRoomClientOptions {
 }
 
 const DEFAULT_GATEWAY_URL =
-  process.env.NEXT_PUBLIC_REALTIME_GATEWAY_WS_URL ?? "ws://127.0.0.1:9000/ws";
+  process.env.NEXT_PUBLIC_REALTIME_GATEWAY_WS_URL ?? "ws://127.0.0.1:9001/ws";
 
 export class RealtimeRoomClient {
   private readonly sessionId: string;

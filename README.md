@@ -56,12 +56,12 @@ Terminal 2, start the FastAPI realtime gateway:
 
 ```bash
 cd agents
-uv run python -m uvicorn app.realtime_gateway.main:app --host 0.0.0.0 --port 9000
+uv run python -m uvicorn app.realtime_gateway.main:app --host 0.0.0.0 --port 9001
 ```
 
 Expected routes:
-- `http://127.0.0.1:9000/`
-- `ws://127.0.0.1:9000/ws`
+- `http://127.0.0.1:9001/`
+- `ws://127.0.0.1:9001/ws`
 
 Terminal 3, start the Next.js app from the repo root:
 
@@ -72,7 +72,7 @@ npm run dev
 Then open:
 
 ```text
-http://localhost:3000
+http://localhost:3001
 ```
 
 ## Environment variables
@@ -81,7 +81,7 @@ The main optional overrides are:
 
 ```env
 # Frontend -> realtime gateway
-NEXT_PUBLIC_REALTIME_GATEWAY_WS_URL=ws://127.0.0.1:9000/ws
+NEXT_PUBLIC_REALTIME_GATEWAY_WS_URL=ws://127.0.0.1:9001/ws
 
 # Coordinator -> specialist A2A base URL
 A2A_SPECIALIST_BASE_URL=http://127.0.0.1:8000
@@ -96,8 +96,8 @@ agents/app/.env
 ## Typical local flow
 
 1. Start the A2A service on port `8000`.
-2. Start the realtime gateway on port `9000`.
-3. Start the Next app on port `3000`.
+2. Start the realtime gateway on port `9001`.
+3. Start the Next app on port `3001`.
 4. Open a project.
 5. Start a room.
 6. Click `Connect voice`.
@@ -116,7 +116,8 @@ agents/app/.env
 
 ## Troubleshooting
 
-- If the room UI loads but voice does not connect, make sure the realtime gateway is running on port `9000`.
+- If the room UI loads but voice does not connect, make sure the realtime gateway is running on port `9001`.
 - If the Coordinator responds without specialist help, make sure the A2A service is running on port `8000`.
 - If the agents fail to start, check the credentials and model settings in [agents/app/.env](./agents/app/.env).
-- If the browser cannot capture audio, confirm microphone permission is granted for `http://localhost:3000`.
+- If the browser cannot capture audio, confirm microphone permission is granted for `http://localhost:3001`.
+- If `http://127.0.0.1:9000/` returns a ClickHouse or Docker response, another local service is already using that port. Use `9001` for the realtime gateway.

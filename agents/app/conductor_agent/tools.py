@@ -10,6 +10,7 @@ from a2a.types import SendMessageRequest
 from google.adk.tools import ToolContext
 
 from app.conductor_agent.registry import SpecialistRegistration, get_specialist_registry
+from app.shared.langfuse import langfuse_span
 from app.shared.realtime_events import get_realtime_event_broker
 
 
@@ -274,49 +275,79 @@ async def _call_specialist(
         },
     )
 
-    async with httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=10.0)) as client:
-        a2a_client = A2AClient(client, url=registration.a2a_url)
-        response = await a2a_client.send_message(
-            SendMessageRequest.model_validate(
-                {
-                    "id": existing_session.get("request_id") or f"req_{registration.role}",
-                    "params": {
-                        "message": {
-                            "messageId": f"msg_{registration.role}_{tool_context.state.get('turn_id', '0')}",
-                            "role": "user",
-                            "contextId": existing_session.get("context_id"),
-                            "taskId": existing_session.get("task_id"),
-                            "parts": [
-                                {
-                                    "kind": "text",
-                                    "text": _build_specialist_prompt(
-                                        registration,
-                                        question=question,
-                                        project_name=project_name,
-                                        project_summary=project_summary,
-                                    ),
-                                }
-                            ],
-                        }
-                    },
+    with langfuse_span(
+        f"consult-{registration.role}",
+        as_type="tool",
+        input={
+            "question": question,
+            "project_name": project_name,
+            "project_summary": project_summary,
+        },
+        metadata={
+            "specialist_role": registration.role,
+            "specialist_name": registration.public_label,
+            "a2a_url": registration.a2a_url,
+            "turn_id": tool_context.state.get("turn_id"),
+        },
+    ) as observation:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=10.0)) as client:
+            a2a_client = A2AClient(client, url=registration.a2a_url)
+            response = await a2a_client.send_message(
+                SendMessageRequest.model_validate(
+                    {
+                        "id": existing_session.get("request_id") or f"req_{registration.role}",
+                        "params": {
+                            "message": {
+                                "messageId": f"msg_{registration.role}_{tool_context.state.get('turn_id', '0')}",
+                                "role": "user",
+                                "contextId": existing_session.get("context_id"),
+                                "taskId": existing_session.get("task_id"),
+                                "parts": [
+                                    {
+                                        "kind": "text",
+                                        "text": _build_specialist_prompt(
+                                            registration,
+                                            question=question,
+                                            project_name=project_name,
+                                            project_summary=project_summary,
+                                        ),
+                                    }
+                                ],
+                            }
+                        },
+                    }
+                )
+            )
+
+        root = response.root
+        error = _safe_getattr(root, "error")
+        if error is not None:
+            message = _safe_getattr(error, "message") or "Unknown A2A error."
+            if observation is not None:
+                observation.update(
+                    level="ERROR",
+                    status_message=str(message),
+                    output={"error": str(message)},
+                )
+            raise RuntimeError(str(message))
+
+        result = _safe_getattr(root, "result")
+        raw_text = _extract_text_result(result)
+        try:
+            parsed = _extract_json_object(raw_text)
+        except ValueError:
+            parsed = None
+
+        normalized = _normalize_specialist_payload(registration, raw_text, parsed)
+        if observation is not None:
+            observation.update(
+                output={
+                    "summary": normalized.get("summary"),
+                    "publicMessage": normalized.get("publicMessage"),
+                    "confidence": normalized.get("confidence"),
+                    "formattingError": normalized.get("formattingError"),
                 }
             )
-        )
-
-    root = response.root
-    error = _safe_getattr(root, "error")
-    if error is not None:
-        message = _safe_getattr(error, "message") or "Unknown A2A error."
-        raise RuntimeError(str(message))
-
-    result = _safe_getattr(root, "result")
-    raw_text = _extract_text_result(result)
-    try:
-        parsed = _extract_json_object(raw_text)
-    except ValueError:
-        parsed = None
-
-    normalized = _normalize_specialist_payload(registration, raw_text, parsed)
 
     specialist_sessions[registration.role] = {
         "context_id": _safe_getattr(result, "context_id", "contextId"),

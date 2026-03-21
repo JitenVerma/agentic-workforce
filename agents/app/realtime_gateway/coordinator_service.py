@@ -17,6 +17,7 @@ from app.realtime_gateway.config import RealtimeGatewaySettings
 from app.realtime_gateway.event_mapper import map_adk_event, participant_state_event
 from app.realtime_gateway.schemas import ServerEvent, create_server_event
 from app.realtime_gateway.session_manager import RealtimeSessionContext
+from app.shared.langfuse import langfuse_span
 
 
 class CoordinatorRealtimeSession:
@@ -255,61 +256,81 @@ class CoordinatorRealtimeSession:
         )
 
         try:
-            async with Aclosing(
-                self._runner.run_live(
-                    user_id=self.context.user_id,
-                    session_id=self.context.session_id,
-                    live_request_queue=self._live_request_queue,
-                    run_config=run_config,
-                )
-            ) as event_stream:
-                async for event in event_stream:
-                    mapped = map_adk_event(
-                        self.context.session_id,
-                        event,
-                        user_message_id=self._active_user_message_id,
-                        coordinator_message_id=self._active_coordinator_message_id,
+            with langfuse_span(
+                "coordinator-live-session",
+                as_type="agent",
+                metadata={
+                    "session_id": self.context.session_id,
+                    "room_id": self.context.room_id,
+                    "project_id": self.context.project_id,
+                    "project_name": self.context.project_name,
+                    "selected_specialist_roles": self.context.selected_specialist_roles,
+                    "conversation_mode": self.context.conversation_mode,
+                },
+            ) as observation:
+                async with Aclosing(
+                    self._runner.run_live(
+                        user_id=self.context.user_id,
+                        session_id=self.context.session_id,
+                        live_request_queue=self._live_request_queue,
+                        run_config=run_config,
                     )
-                    has_output = bool(
-                        (event.output_transcription and event.output_transcription.text)
-                        or (
-                            event.content
-                            and any(
-                                part.inline_data or part.text
-                                for part in (event.content.parts or [])
-                            )
+                ) as event_stream:
+                    async for event in event_stream:
+                        mapped = map_adk_event(
+                            self.context.session_id,
+                            event,
+                            user_message_id=self._active_user_message_id,
+                            coordinator_message_id=self._active_coordinator_message_id,
                         )
-                    )
-
-                    if has_output and not self._coordinator_speaking:
-                        self._coordinator_speaking = True
-                        await self._emit(
-                            participant_state_event(
-                                self.context.session_id,
-                                participant_id="participant-conductor",
-                                role="conductor",
-                                name="Coordinator",
-                                state="speaking",
+                        has_output = bool(
+                            (event.output_transcription and event.output_transcription.text)
+                            or (
+                                event.content
+                                and any(
+                                    part.inline_data or part.text
+                                    for part in (event.content.parts or [])
+                                )
                             )
                         )
 
-                    for mapped_event in mapped:
-                        await self._emit(mapped_event)
-
-                    if event.turn_complete and self._coordinator_speaking:
-                        self._coordinator_speaking = False
-                        await self._emit(
-                            participant_state_event(
-                                self.context.session_id,
-                                participant_id="participant-conductor",
-                                role="conductor",
-                                name="Coordinator",
-                                state="idle",
+                        if has_output and not self._coordinator_speaking:
+                            self._coordinator_speaking = True
+                            await self._emit(
+                                participant_state_event(
+                                    self.context.session_id,
+                                    participant_id="participant-conductor",
+                                    role="conductor",
+                                    name="Coordinator",
+                                    state="speaking",
+                                )
                             )
-                        )
-                    if event.turn_complete:
-                        self._active_user_message_id = None
-                        self._active_coordinator_message_id = None
+
+                        for mapped_event in mapped:
+                            await self._emit(mapped_event)
+
+                        if event.turn_complete and self._coordinator_speaking:
+                            self._coordinator_speaking = False
+                            await self._emit(
+                                participant_state_event(
+                                    self.context.session_id,
+                                    participant_id="participant-conductor",
+                                    role="conductor",
+                                    name="Coordinator",
+                                    state="idle",
+                                )
+                            )
+                        if event.turn_complete:
+                            if observation is not None:
+                                observation.update(
+                                    output={
+                                        "last_user_message_id": self._active_user_message_id,
+                                        "last_coordinator_message_id": self._active_coordinator_message_id,
+                                        "turn_complete": True,
+                                    }
+                                )
+                            self._active_user_message_id = None
+                            self._active_coordinator_message_id = None
         except asyncio.CancelledError:
             raise
         except Exception as exc:

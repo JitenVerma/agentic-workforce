@@ -31,6 +31,8 @@ export function ParticipantCard({
   const icon =
     state === "speaking" ? (
       <Sparkles size={16} />
+    ) : state === "thinking" ? (
+      <Sparkles size={16} />
     ) : state === "queued" || state === "hand-raised" ? (
       <Hand size={16} />
     ) : muted ? (
@@ -59,6 +61,8 @@ export function ParticipantCard({
           {icon}
           {state === "priority"
             ? "Human priority"
+            : state === "thinking"
+              ? "Preparing response"
             : state === "queued"
               ? "Queued to speak"
               : state === "hand-raised"

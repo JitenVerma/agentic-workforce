@@ -27,7 +27,7 @@ export function CallControls({
       </button>
       <button className={`control-chip control-chip--priority ${speaking ? "control-chip--active" : ""}`} onClick={onToggleSpeaking}>
         <Waves size={16} />
-        {speaking ? "Stop speaking" : "Speak now"}
+        {speaking ? "Resume room" : "Take floor"}
       </button>
       <button className={`control-chip ${transcriptVisible ? "control-chip--active" : ""}`} onClick={onToggleTranscript}>
         <Captions size={16} />

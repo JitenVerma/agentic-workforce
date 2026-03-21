@@ -14,7 +14,7 @@ export function TranscriptFeed({ transcript, activity, hidden = false }: Transcr
           <div className="panel-header">
             <div>
               <p className="eyebrow">Live Transcript</p>
-              <h3>Mocked conversation feed</h3>
+              <h3>Call conversation feed</h3>
             </div>
           </div>
           <div className="panel-scroll">

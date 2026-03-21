@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { startTransition, useEffect, useMemo, useState } from "react";
 import {
   ArrowLeft,
   BriefcaseBusiness,
@@ -13,17 +13,27 @@ import {
   Users,
 } from "lucide-react";
 import { AgentCard } from "@/components/agent-card";
+import { A2AAgentConsole } from "@/components/a2a-agent-console";
 import { CallControls } from "@/components/call-controls";
+import { LiveVoiceAgentPanel } from "@/components/live-voice-agent-panel";
 import { Modal } from "@/components/modal";
 import { ParticipantCard } from "@/components/participant-card";
 import { ProjectCard } from "@/components/project-card";
 import { TranscriptFeed } from "@/components/transcript-feed";
 import {
-  AGENTS,
+  buildFollowUpPrompt,
+  buildKickoffPrompt,
+  estimateSpeakingDuration,
+  toLiveAgentProfile,
+} from "@/lib/a2a/presentation";
+import {
+  A2AAgentMessageResponse,
+  A2AAgentsResponse,
+  A2AResolvedAgent,
+} from "@/lib/a2a/types";
+import {
   buildCallSummary,
-  buildDemoEvents,
   HUMAN_PARTICIPANT,
-  HUMAN_PROMPTS,
   INITIAL_PROJECTS,
 } from "@/lib/mock-data";
 import {
@@ -31,6 +41,7 @@ import {
   CallSession,
   CallSummary,
   DemoEvent,
+  LiveAgentProfile,
   Project,
   Screen,
   TranscriptEntry,
@@ -83,6 +94,20 @@ function createTranscript(
   };
 }
 
+function createQueuedAgentEvent(
+  agent: LiveAgentProfile,
+  payload: A2AAgentMessageResponse,
+): DemoEvent {
+  return {
+    id: `event-${agent.id}-${crypto.randomUUID()}`,
+    at: 0,
+    agentId: agent.id,
+    duration: estimateSpeakingDuration(payload.text),
+    raiseMessage: `${agent.name} has a contribution ready.`,
+    transcript: payload.text,
+  };
+}
+
 export function PrototypeApp() {
   const [screen, setScreen] = useState<Screen>("dashboard");
   const [projects, setProjects] = useState<Project[]>(INITIAL_PROJECTS);
@@ -92,16 +117,12 @@ export function PrototypeApp() {
   const [newProject, setNewProject] = useState(defaultNewProject);
   const [isAgentModalOpen, setIsAgentModalOpen] = useState(false);
   const [agentSearch, setAgentSearch] = useState("");
-  const [selectedAgentIds, setSelectedAgentIds] = useState<string[]>([
-    "product-owner",
-    "solutions-architect",
-    "ui-ux-designer",
-    "software-engineer",
-  ]);
+  const [availableA2AAgents, setAvailableA2AAgents] = useState<A2AResolvedAgent[]>([]);
+  const [isLoadingA2AAgents, setIsLoadingA2AAgents] = useState(true);
+  const [a2aAgentError, setA2AAgentError] = useState<string | null>(null);
+  const [selectedAgentIds, setSelectedAgentIds] = useState<string[]>([]);
   const [call, setCall] = useState<CallSession | null>(null);
   const [summary, setSummary] = useState<CallSummary | null>(null);
-  const demoEventsRef = useRef<DemoEvent[]>([]);
-  const humanPromptIndexRef = useRef(0);
 
   const selectedProject = useMemo(
     () => projects.find((project) => project.id === selectedProjectId) ?? projects[0],
@@ -122,21 +143,100 @@ export function PrototypeApp() {
     });
   }, [projectSearch, projects]);
 
+  const liveAgents = useMemo(
+    () => availableA2AAgents.map((agent, index) => toLiveAgentProfile(agent, index)),
+    [availableA2AAgents],
+  );
+
   const filteredAgents = useMemo(() => {
     const query = agentSearch.trim().toLowerCase();
     if (!query) {
-      return AGENTS;
+      return liveAgents;
     }
 
-    return AGENTS.filter((agent) =>
-      [agent.name, agent.role, agent.description, agent.perspective].join(" ").toLowerCase().includes(query),
+    return liveAgents.filter((agent) =>
+      [agent.name, agent.role, agent.description, agent.perspective, agent.baseUrl]
+        .join(" ")
+        .toLowerCase()
+        .includes(query),
     );
-  }, [agentSearch]);
+  }, [agentSearch, liveAgents]);
 
   const selectedAgents = useMemo(
-    () => AGENTS.filter((agent) => selectedAgentIds.includes(agent.id)),
-    [selectedAgentIds],
+    () => liveAgents.filter((agent) => selectedAgentIds.includes(agent.id)),
+    [liveAgents, selectedAgentIds],
   );
+
+  const callAgents = useMemo(
+    () =>
+      call
+        ? liveAgents.filter((agent) => call.selectedAgentIds.includes(agent.id))
+        : [],
+    [call, liveAgents],
+  );
+
+  const findAgentById = (agentId: string | null | undefined) =>
+    liveAgents.find((agent) => agent.id === agentId);
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadA2AAgents() {
+      setIsLoadingA2AAgents(true);
+      setA2AAgentError(null);
+
+      try {
+        const response = await fetch("/api/a2a/agents", { cache: "no-store" });
+
+        if (!response.ok) {
+          throw new Error("Unable to load A2A agents for the call roster.");
+        }
+
+        const payload = (await response.json()) as A2AAgentsResponse;
+        if (!active) {
+          return;
+        }
+
+        startTransition(() => {
+          setAvailableA2AAgents(payload.agents);
+          setSelectedAgentIds((current) => {
+            const currentIds = current.filter((id) =>
+              payload.agents.some((agent) => agent.id === id && agent.status === "online"),
+            );
+
+            if (currentIds.length > 0) {
+              return currentIds;
+            }
+
+            return payload.agents
+              .filter((agent) => agent.status === "online")
+              .slice(0, 4)
+              .map((agent) => agent.id);
+          });
+        });
+      } catch (error) {
+        if (!active) {
+          return;
+        }
+
+        setA2AAgentError(
+          error instanceof Error
+            ? error.message
+            : "Unable to load A2A agents for the call roster.",
+        );
+      } finally {
+        if (active) {
+          setIsLoadingA2AAgents(false);
+        }
+      }
+    }
+
+    void loadA2AAgents();
+
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (screen !== "call" || !call || !selectedProject) {
@@ -162,79 +262,405 @@ export function PrototypeApp() {
           };
         }
 
-        const dueEvents = demoEventsRef.current.filter((event) => event.at <= next.elapsedSeconds);
-        if (dueEvents.length > 0) {
-          const existingIds = new Set([next.activeSpeakerId, ...next.queue.map((item) => item.agentId)]);
-
-          for (const event of dueEvents) {
-            if (existingIds.has(event.agentId)) {
-              continue;
-            }
-
-            next = {
-              ...next,
-              queue: [...next.queue, event],
-              activity: [createActivity("Hand raised", event.raiseMessage, "queue"), ...next.activity],
-            };
-            existingIds.add(event.agentId);
-          }
-
-          demoEventsRef.current = demoEventsRef.current.filter((event) => event.at > next.elapsedSeconds);
-        }
-
-        if (next.humanSpeaking) {
-          return next;
-        }
-
-        if (next.activeSpeakerKind === "agent" && next.activeRemaining > 1) {
-          return {
-            ...next,
-            activeRemaining: next.activeRemaining - 1,
-          };
-        }
-
-        if (next.activeSpeakerKind === "agent" && next.activeRemaining <= 1) {
-          next = {
-            ...next,
-            activeSpeakerId: null,
-            activeSpeakerKind: null,
-            activeRemaining: 0,
-            currentSpeech: null,
-          };
-        }
-
-        if (!next.activeSpeakerId && next.queue.length > 0) {
-          const [nextSpeech, ...remainingQueue] = next.queue;
-          const agent = AGENTS.find((item) => item.id === nextSpeech.agentId);
-
-          if (!agent) {
-            return { ...next, queue: remainingQueue };
-          }
-
-          return {
-            ...next,
-            queue: remainingQueue,
-            activeSpeakerId: agent.id,
-            activeSpeakerKind: "agent",
-            activeRemaining: nextSpeech.duration,
-            currentSpeech: nextSpeech,
-            transcript: [
-              createTranscript(next.elapsedSeconds, agent.id, agent.name, agent.role, "agent", nextSpeech.transcript),
-              ...next.transcript,
-            ],
-            activity: [
-              createActivity("Agent speaking", `${agent.name} now has the floor.`, "info"),
-              ...next.activity,
-            ],
-          };
-        }
-
         return next;
       });
     }, 1000);
 
     return () => window.clearInterval(interval);
-  }, [call, screen, selectedProject]);
+  }, [call, screen, selectedProject, liveAgents]);
+
+  useEffect(() => {
+    if (
+      screen !== "call" ||
+      !call ||
+      call.status !== "live" ||
+      call.humanSpeaking ||
+      call.activeSpeakerId ||
+      call.queue.length === 0
+    ) {
+      return;
+    }
+
+    const [nextSpeech, ...remainingQueue] = call.queue;
+    const agent = findAgentById(nextSpeech.agentId);
+
+    setCall((current) => {
+      if (!current) {
+        return current;
+      }
+
+      if (!agent) {
+        return {
+          ...current,
+          queue: remainingQueue,
+        };
+      }
+
+      return {
+        ...current,
+        queue: remainingQueue,
+        activeSpeakerId: agent.id,
+        activeSpeakerKind: "agent",
+        activeRemaining: nextSpeech.duration,
+        currentSpeech: nextSpeech,
+        transcript: [
+          createTranscript(
+            current.elapsedSeconds,
+            agent.id,
+            agent.name,
+            agent.role,
+            "agent",
+            nextSpeech.transcript,
+          ),
+          ...current.transcript,
+        ],
+        activity: [
+          createActivity("Agent speaking", `${agent.name} now has the floor.`, "info"),
+          ...current.activity,
+        ],
+      };
+    });
+  }, [call, screen, liveAgents]);
+
+  useEffect(() => {
+    if (
+      screen !== "call" ||
+      !call ||
+      call.activeSpeakerKind !== "agent" ||
+      !call.currentSpeech
+    ) {
+      return;
+    }
+
+    const speechId = call.currentSpeech.id;
+    const timeout = window.setTimeout(() => {
+      setCall((current) => {
+        if (!current || current.currentSpeech?.id !== speechId) {
+          return current;
+        }
+
+        return {
+          ...current,
+          activeSpeakerId: null,
+          activeSpeakerKind: null,
+          activeRemaining: 0,
+          currentSpeech: null,
+          humanSpeaking: false,
+        };
+      });
+    }, Math.max(1500, call.currentSpeech.duration * 1000));
+
+    return () => {
+      window.clearTimeout(timeout);
+    };
+  }, [screen, call?.activeSpeakerKind, call?.currentSpeech?.id]);
+
+  useEffect(() => {
+    if (screen !== "call" || !call || call.status !== "live" || !selectedProject) {
+      return;
+    }
+
+    const agentsToPrompt = call.selectedAgentIds
+      .map((agentId) => findAgentById(agentId))
+      .filter(
+        (agent): agent is LiveAgentProfile => {
+          if (!agent) {
+            return false;
+          }
+
+          return (
+            agent.status === "online" &&
+            !call.pendingAgentIds.includes(agent.id) &&
+            !call.respondedAgentIds.includes(agent.id)
+          );
+        },
+      );
+
+    if (agentsToPrompt.length === 0) {
+      return;
+    }
+
+    setCall((current) => {
+      if (!current) {
+        return current;
+      }
+
+      return {
+        ...current,
+        pendingAgentIds: Array.from(
+          new Set([...current.pendingAgentIds, ...agentsToPrompt.map((agent) => agent.id)]),
+        ),
+        activity: [
+          createActivity(
+            "Agent prompts sent",
+            `Sent kickoff context to ${agentsToPrompt.map((agent) => agent.name).join(", ")}.`,
+            "info",
+          ),
+          ...current.activity,
+        ],
+      };
+    });
+
+    let cancelled = false;
+
+    for (const agent of agentsToPrompt) {
+      void (async () => {
+        try {
+          const response = await fetch(`/api/a2a/agents/${agent.id}/message`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              text: buildKickoffPrompt(selectedProject, agent),
+            }),
+          });
+
+          const payload = (await response.json()) as
+            | A2AAgentMessageResponse
+            | { error?: string };
+
+          if (!response.ok) {
+            const message =
+              "error" in payload && payload.error
+                ? payload.error
+                : `Unable to get a response from ${agent.name}.`;
+            throw new Error(message);
+          }
+
+          if (!("kind" in payload) || cancelled) {
+            return;
+          }
+
+          setCall((current) => {
+            if (!current) {
+              return current;
+            }
+
+            const event = createQueuedAgentEvent(agent, payload);
+
+            return {
+              ...current,
+              pendingAgentIds: current.pendingAgentIds.filter((id) => id !== agent.id),
+              respondedAgentIds: Array.from(new Set([...current.respondedAgentIds, agent.id])),
+              agentSessions: {
+                ...current.agentSessions,
+                [agent.id]: {
+                  contextId: payload.contextId ?? current.agentSessions[agent.id]?.contextId,
+                  taskId: payload.taskId ?? current.agentSessions[agent.id]?.taskId,
+                },
+              },
+              queue: [...current.queue, event],
+              activity: [
+                createActivity("Hand raised", `${agent.name} is ready to speak.`, "queue"),
+                ...current.activity,
+              ],
+            };
+          });
+        } catch (error) {
+          if (cancelled) {
+            return;
+          }
+
+          const message =
+            error instanceof Error
+              ? error.message
+              : `Unable to get a response from ${agent.name}.`;
+
+          setCall((current) => {
+            if (!current) {
+              return current;
+            }
+
+            return {
+              ...current,
+              pendingAgentIds: current.pendingAgentIds.filter((id) => id !== agent.id),
+              activity: [
+                createActivity("Agent unavailable", `${agent.name}: ${message}`, "info"),
+                ...current.activity,
+              ],
+              transcript: [
+                createTranscript(current.elapsedSeconds, "system", "System", "A2A Status", "system", `${agent.name} did not respond: ${message}`),
+                ...current.transcript,
+              ],
+            };
+          });
+        }
+      })();
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [call, screen, selectedProject, liveAgents]);
+
+  useEffect(() => {
+    if (
+      screen !== "call" ||
+      !call ||
+      call.status !== "live" ||
+      !selectedProject ||
+      call.humanSpeaking ||
+      call.pendingAgentIds.length > 0 ||
+      call.activeSpeakerKind !== null ||
+      call.queue.length > 0
+    ) {
+      return;
+    }
+
+    const latestHumanEntry = call.transcript.find((entry) => entry.kind === "human");
+    if (!latestHumanEntry || latestHumanEntry.id === call.lastBroadcastHumanEntryId) {
+      return;
+    }
+
+    const agentsToPrompt = call.selectedAgentIds
+      .map((agentId) => findAgentById(agentId))
+      .filter((agent): agent is LiveAgentProfile => {
+        if (!agent) {
+          return false;
+        }
+
+        return agent.status === "online" && !call.pendingAgentIds.includes(agent.id);
+      });
+
+    if (agentsToPrompt.length === 0) {
+      return;
+    }
+
+    const humanEntryId = latestHumanEntry.id;
+
+    setCall((current) => {
+      if (!current) {
+        return current;
+      }
+
+      return {
+        ...current,
+        pendingAgentIds: Array.from(
+          new Set([...current.pendingAgentIds, ...agentsToPrompt.map((agent) => agent.id)]),
+        ),
+        lastBroadcastHumanEntryId: humanEntryId,
+        activity: [
+          createActivity(
+            "Live follow-up sent",
+            `Shared the host's latest call update with ${agentsToPrompt
+              .map((agent) => agent.name)
+              .join(", ")}.`,
+            "info",
+          ),
+          ...current.activity,
+        ],
+      };
+    });
+
+    let cancelled = false;
+
+    for (const agent of agentsToPrompt) {
+      const session = call.agentSessions[agent.id];
+
+      void (async () => {
+        try {
+          const response = await fetch(`/api/a2a/agents/${agent.id}/message`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              text: buildFollowUpPrompt(
+                selectedProject,
+                agent,
+                latestHumanEntry.message,
+                call.transcript,
+              ),
+              contextId: session?.contextId,
+              taskId: session?.taskId,
+            }),
+          });
+
+          const payload = (await response.json()) as
+            | A2AAgentMessageResponse
+            | { error?: string };
+
+          if (!response.ok) {
+            const message =
+              "error" in payload && payload.error
+                ? payload.error
+                : `Unable to get a response from ${agent.name}.`;
+            throw new Error(message);
+          }
+
+          if (!("kind" in payload) || cancelled) {
+            return;
+          }
+
+          setCall((current) => {
+            if (!current) {
+              return current;
+            }
+
+            const event = createQueuedAgentEvent(agent, payload);
+
+            return {
+              ...current,
+              pendingAgentIds: current.pendingAgentIds.filter((id) => id !== agent.id),
+              respondedAgentIds: Array.from(new Set([...current.respondedAgentIds, agent.id])),
+              agentSessions: {
+                ...current.agentSessions,
+                [agent.id]: {
+                  contextId: payload.contextId ?? current.agentSessions[agent.id]?.contextId,
+                  taskId: payload.taskId ?? current.agentSessions[agent.id]?.taskId,
+                },
+              },
+              queue: [...current.queue, event],
+              activity: [
+                createActivity("Hand raised", `${agent.name} is ready to respond to the host.`, "queue"),
+                ...current.activity,
+              ],
+            };
+          });
+        } catch (error) {
+          if (cancelled) {
+            return;
+          }
+
+          const message =
+            error instanceof Error
+              ? error.message
+              : `Unable to get a response from ${agent.name}.`;
+
+          setCall((current) => {
+            if (!current) {
+              return current;
+            }
+
+            return {
+              ...current,
+              pendingAgentIds: current.pendingAgentIds.filter((id) => id !== agent.id),
+              activity: [
+                createActivity("Agent unavailable", `${agent.name}: ${message}`, "info"),
+                ...current.activity,
+              ],
+              transcript: [
+                createTranscript(
+                  current.elapsedSeconds,
+                  "system",
+                  "System",
+                  "A2A Status",
+                  "system",
+                  `${agent.name} did not respond to the latest host update: ${message}`,
+                ),
+                ...current.transcript,
+              ],
+            };
+          });
+        }
+      })();
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [call, screen, selectedProject, liveAgents]);
 
   const openProject = (projectId: string) => {
     setSelectedProjectId(projectId);
@@ -275,6 +701,11 @@ export function PrototypeApp() {
   };
 
   const toggleAgent = (agentId: string) => {
+    const agent = findAgentById(agentId);
+    if (!agent || agent.status !== "online") {
+      return;
+    }
+
     setSelectedAgentIds((current) =>
       current.includes(agentId) ? current.filter((id) => id !== agentId) : [...current, agentId],
     );
@@ -285,11 +716,30 @@ export function PrototypeApp() {
       return;
     }
 
-    demoEventsRef.current = buildDemoEvents(selectedAgentIds, selectedProject);
-    humanPromptIndexRef.current = 0;
+    const roomStatusEntry = createTranscript(
+      0,
+      "system",
+      "System",
+      "Room Status",
+      "system",
+      "Kickoff room is preparing participants and syncing context.",
+    );
+    const openingHumanEntry = createTranscript(
+      1,
+      HUMAN_PARTICIPANT.id,
+      HUMAN_PARTICIPANT.name,
+      HUMAN_PARTICIPANT.role,
+      "human",
+      `I want this call to define the strongest version of ${selectedProject.name} and capture concrete next steps.`,
+    );
+
     setCall({
       projectId: selectedProject.id,
       selectedAgentIds,
+      pendingAgentIds: [],
+      respondedAgentIds: [],
+      agentSessions: {},
+      lastBroadcastHumanEntryId: openingHumanEntry.id,
       elapsedSeconds: 0,
       status: "connecting",
       muted: false,
@@ -300,17 +750,7 @@ export function PrototypeApp() {
       activeRemaining: 0,
       currentSpeech: null,
       queue: [],
-      transcript: [
-        createTranscript(0, "system", "System", "Room Status", "system", "Kickoff room is preparing participants and syncing context."),
-        createTranscript(
-          1,
-          HUMAN_PARTICIPANT.id,
-          HUMAN_PARTICIPANT.name,
-          HUMAN_PARTICIPANT.role,
-          "human",
-          `I want this call to define the strongest version of ${selectedProject.name} and capture concrete next steps.`,
-        ),
-      ],
+      transcript: [roomStatusEntry, openingHumanEntry],
       activity: [
         createActivity("Room created", "Voice kickoff room initialized with selected participants.", "info"),
         createActivity("Human priority", "The host can speak at any time, regardless of the queue.", "priority"),
@@ -346,6 +786,10 @@ export function PrototypeApp() {
   };
 
   const toggleHumanSpeaking = () => {
+    if (!call || call.muted) {
+      return;
+    }
+
     setCall((current) => {
       if (!current || current.muted) {
         return current;
@@ -358,7 +802,7 @@ export function PrototypeApp() {
           activeSpeakerId: null,
           activeSpeakerKind: null,
           activity: [
-            createActivity("Human finished", "The host yielded the floor back to the room.", "priority"),
+            createActivity("Host released the floor", "Queued agent turns can resume now.", "priority"),
             ...current.activity,
           ],
         };
@@ -366,10 +810,8 @@ export function PrototypeApp() {
 
       const interruptedAgent =
         current.activeSpeakerKind === "agent"
-          ? AGENTS.find((agent) => agent.id === current.activeSpeakerId)
+          ? findAgentById(current.activeSpeakerId)
           : null;
-      const prompt = HUMAN_PROMPTS[humanPromptIndexRef.current % HUMAN_PROMPTS.length];
-      humanPromptIndexRef.current += 1;
 
       return {
         ...current,
@@ -378,16 +820,12 @@ export function PrototypeApp() {
         activeSpeakerKind: "human",
         activeRemaining: 0,
         currentSpeech: null,
-        transcript: [
-          createTranscript(current.elapsedSeconds, HUMAN_PARTICIPANT.id, HUMAN_PARTICIPANT.name, HUMAN_PARTICIPANT.role, "human", prompt),
-          ...current.transcript,
-        ],
         activity: [
           createActivity(
-            "Human priority",
+            "Host has the floor",
             interruptedAgent
-              ? `The host interrupted ${interruptedAgent.name} and took the floor immediately.`
-              : "The host started speaking and took priority over the queue.",
+              ? `The host interrupted ${interruptedAgent.name} and is speaking directly over the live audio link.`
+              : "The host is speaking directly over the live audio link, so async agent turns are paused.",
             "priority",
           ),
           ...current.activity,
@@ -457,8 +895,7 @@ export function PrototypeApp() {
           <p className="eyebrow">AI Project Kickoff Room</p>
           <h1>Assemble specialist agents and run a structured voice planning session.</h1>
           <p className="hero-copy">
-            This prototype simulates how a human host could invite role-based AI collaborators, manage turn-taking,
-            and leave the call with a crisp project brief.
+            Invite live A2A agents, coordinate the room, and open a direct speech-to-speech link with an ADK voice agent while the workspace captures planning outcomes.
           </p>
         </div>
         <div className="hero-stats">
@@ -600,6 +1037,10 @@ export function PrototypeApp() {
               ))}
             </div>
           </article>
+
+          <article className="panel panel--wide">
+            <A2AAgentConsole project={selectedProject} />
+          </article>
         </section>
       </div>
     );
@@ -630,9 +1071,9 @@ export function PrototypeApp() {
         </section>
 
         <section className="priority-banner">
-          <strong>Human host priority</strong>
+          <strong>Direct voice is live-first</strong>
           <span>
-            You can speak immediately at any point. Agent hand raises remain queued and resume afterward.
+            Use the live voice panel to talk to one selected ADK agent over raw audio. The room queue on this screen stays available for async A2A contributions.
           </span>
         </section>
 
@@ -656,16 +1097,18 @@ export function PrototypeApp() {
                         : "listening"
                 }
               />
-              {selectedAgents.map((agent) => {
-                const queuePosition = participantQueuePositions.get(agent.id);
-                const state =
-                  call.activeSpeakerId === agent.id
-                    ? "speaking"
-                    : typeof queuePosition === "number"
-                      ? "queued"
-                      : call.elapsedSeconds >= 2
-                        ? "listening"
-                        : "idle";
+              {callAgents.map((agent) => {
+                    const queuePosition = participantQueuePositions.get(agent.id);
+                    const state =
+                      call.activeSpeakerId === agent.id
+                        ? "speaking"
+                        : call.pendingAgentIds.includes(agent.id)
+                          ? "thinking"
+                        : typeof queuePosition === "number"
+                          ? "queued"
+                        : call.elapsedSeconds >= 2
+                          ? "listening"
+                          : "idle";
 
                 return (
                   <ParticipantCard
@@ -691,7 +1134,7 @@ export function PrototypeApp() {
               <div className="queue-list">
                 {call.queue.length > 0 ? (
                   call.queue.map((item, index) => {
-                    const agent = AGENTS.find((entry) => entry.id === item.agentId);
+                    const agent = findAgentById(item.agentId);
                     if (!agent) {
                       return null;
                     }
@@ -718,6 +1161,7 @@ export function PrototypeApp() {
           </div>
 
           <div className="panels-column">
+            <LiveVoiceAgentPanel agents={callAgents} muted={call.muted} />
             <TranscriptFeed transcript={call.transcript} activity={call.activity} hidden={!call.showTranscript} />
           </div>
         </section>
@@ -747,8 +1191,7 @@ export function PrototypeApp() {
             <p className="eyebrow">Call Summary</p>
             <h1>{selectedProject.name} now has a structured planning brief.</h1>
             <p className="hero-copy">
-              This mocked synthesis shows how a kickoff room can translate conversation into requirements, risks,
-              architecture direction, and next actions.
+              This summary shows how the kickoff room can translate conversation into requirements, risks, architecture direction, and next actions.
             </p>
           </div>
           <div className="summary-participants">
@@ -858,7 +1301,7 @@ export function PrototypeApp() {
           </div>
         </div>
         <div className="header-meta">
-          <span>Mocked voice collaboration</span>
+          <span>Live ADK voice collaboration</span>
           <span>Structured kickoff workflow</span>
           <span>Human-in-control</span>
         </div>
@@ -916,8 +1359,8 @@ export function PrototypeApp() {
 
       {isAgentModalOpen && selectedProject ? (
         <Modal
-          title="Invite specialist agents"
-          subtitle={`Choose the AI roles that should join the kickoff for ${selectedProject.name}.`}
+          title="Invite A2A agents"
+          subtitle={`Choose the live A2A participants that should join the kickoff for ${selectedProject.name}.`}
           onClose={() => setIsAgentModalOpen(false)}
           width="large"
         >
@@ -933,19 +1376,43 @@ export function PrototypeApp() {
               </div>
               <div className="selection-summary">
                 <strong>{selectedAgentIds.length} selected</strong>
-                <span>Pick the voices you want in the room</span>
+                <span>Pick the live A2A participants you want in the room</span>
               </div>
             </div>
 
             <div className="agent-grid">
-              {filteredAgents.map((agent) => (
-                <AgentCard
-                  key={agent.id}
-                  agent={agent}
-                  selected={selectedAgentIds.includes(agent.id)}
-                  onToggle={toggleAgent}
-                />
-              ))}
+              {isLoadingA2AAgents ? (
+                <div className="empty-state agent-grid__empty">
+                  <Sparkles size={18} />
+                  <p>Loading the live A2A roster.</p>
+                </div>
+              ) : a2aAgentError ? (
+                <div className="empty-state agent-grid__empty">
+                  <BriefcaseBusiness size={18} />
+                  <p>{a2aAgentError}</p>
+                </div>
+              ) : filteredAgents.length > 0 ? (
+                filteredAgents.map((agent) => (
+                  <AgentCard
+                    key={agent.id}
+                    agent={agent}
+                    selected={selectedAgentIds.includes(agent.id)}
+                    onToggle={toggleAgent}
+                    disabled={agent.status !== "online"}
+                    footerLabel={
+                      agent.status === "online"
+                        ? undefined
+                        : agent.error ?? "Offline or unreachable"
+                    }
+                    statusLabel={agent.status === "online" ? "A2A live" : "Offline"}
+                  />
+                ))
+              ) : (
+                <div className="empty-state agent-grid__empty">
+                  <Users size={18} />
+                  <p>No A2A agents matched this search.</p>
+                </div>
+              )}
             </div>
 
             <div className="selected-strip">
@@ -959,7 +1426,15 @@ export function PrototypeApp() {
                   ))}
                 </div>
               </div>
-              <button className="primary-button" onClick={startCall} disabled={selectedAgentIds.length === 0}>
+              <button
+                className="primary-button"
+                onClick={startCall}
+                disabled={
+                  selectedAgentIds.length === 0 ||
+                  isLoadingA2AAgents ||
+                  selectedAgents.length === 0
+                }
+              >
                 Start Call
               </button>
             </div>

@@ -1,13 +1,6 @@
 export type ProjectStatus = "Draft" | "Active" | "Review";
 
-export type AgentRole =
-  | "Software Engineer"
-  | "Cyber Security Engineer"
-  | "Platform Engineer"
-  | "UI/UX Designer"
-  | "Solutions Architect"
-  | "Product Owner"
-  | "Scrum Master";
+export type AgentRole = string;
 
 export type Screen = "dashboard" | "workspace" | "call" | "summary";
 
@@ -15,6 +8,7 @@ export type ParticipantState =
   | "idle"
   | "listening"
   | "speaking"
+  | "thinking"
   | "hand-raised"
   | "queued"
   | "priority";
@@ -48,6 +42,18 @@ export interface AgentProfile {
   perspective: string;
   accent: string;
   initials: string;
+}
+
+export interface LiveAgentProfile extends AgentProfile {
+  baseUrl: string;
+  liveUrl?: string;
+  status: "online" | "offline";
+  error?: string;
+}
+
+export interface CallAgentSession {
+  contextId?: string;
+  taskId?: string;
 }
 
 export interface TranscriptEntry {
@@ -87,6 +93,10 @@ export interface CallSummary {
 export interface CallSession {
   projectId: string;
   selectedAgentIds: string[];
+  pendingAgentIds: string[];
+  respondedAgentIds: string[];
+  agentSessions: Record<string, CallAgentSession>;
+  lastBroadcastHumanEntryId: string | null;
   elapsedSeconds: number;
   status: "connecting" | "live";
   muted: boolean;

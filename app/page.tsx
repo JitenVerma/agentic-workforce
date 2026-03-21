@@ -1,5 +1,5 @@
-import { PrototypeApp } from "@/components/prototype-app";
+import { AgenticWorkforceApp } from "@/components/agentic-workforce-app";
 
 export default function Home() {
-  return <PrototypeApp />;
+  return <AgenticWorkforceApp />;
 }
